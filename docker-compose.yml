@@ -1,0 +1,16 @@
+services:
+  pdf2xlsx:
+    build: .
+    image: pdf2xlsx:latest
+    container_name: pdf2xlsx
+    restart: unless-stopped
+    # 只绑定本机回环，公网流量一律经宿主机 nginx 反向代理进来
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      PORT: "8765"
+      HOST: "0.0.0.0"
+      THREADS: "4"
+      MAX_UPLOAD_MB: "50"
+      CHANNEL_TIMEOUT: "300"
+      ACCESS_CODE: ${ACCESS_CODE:?请先运行 ./init-env.sh 生成 .env，或手动设置 ACCESS_CODE}

@@ -1,0 +1,138 @@
+天天采配清单-PDF转Excel 网页版 · 部署说明（已上线 · 含 IP 限流加固）
+========================================================
+
+访问地址：https://your-domain.com/ttqd/
+带口令链接：https://your-domain.com/ttqd/#code=<口令>
+（口令单独告知，不写在本文件里；服务器上 /opt/ttqd/.env 可查）
+
+一、当前实际架构
+  用户 → Cloudflare 灰云直连 → 服务器 nginx(443, 宝塔)
+       → location ^~ /ttqd/ 反代 → 127.0.0.1:8765
+       → Docker 容器 pdf2xlsx（python:3.12-slim + waitress）
+
+  · 复用 your-domain.com 已有证书（CN=your-domain.com），无需另签证书
+  · 复用主站已有的 HTTP→HTTPS 跳转，无需加 DNS 记录
+  · 8765 只绑 127.0.0.1，不对公网开放
+  · 主站 your-domain.com 其余页面完全不受影响
+
+二、服务器上的文件
+  应用目录：/opt/ttqd/
+    app.py、converter_core.py、static/index.html
+    Dockerfile、docker-compose.yml、requirements.txt、.dockerignore
+    .env                       访问口令，权限 600，属主 ubuntu
+    nginx.conf.example         反代 + 限流规则片段模板
+    nginx-limits.conf.example  http 级限流 zone 定义模板
+    ttqd.conf.bak.*            限流加固前的旧片段备份（可回滚）
+
+  nginx 片段两个都必须在位（root 权限，缺一不可）：
+    /www/server/panel/vhost/nginx/0.ttqd-limits.conf
+        ← http 上下文，定义 ttqd_upload / ttqd_conn 两个 zone
+    /www/server/panel/vhost/nginx/extension/your-domain.com/ttqd.conf
+        ← server 上下文，反代规则 + 限流规则 + 上传接口秒拒
+
+  为什么分两个文件：
+    宝塔主 nginx.conf 第 96 行（http 块内）已有
+      include /www/server/panel/vhost/nginx/*.conf;
+    所以该目录下 .conf 的顶层指令处于 http 上下文，能定义 zone。
+    而 extension 目录是被主站 server 块 include 的，在里面定义 zone
+    会直接 nginx -t 报错。宝塔主 nginx.conf 一个字都没改。
+    0. 开头的文件名保证按字母序先于 your-domain.com.conf 加载。
+
+  主站配置 /www/server/panel/vhost/nginx/your-domain.com.conf 第 15 行
+  include 了 extension 目录，所以片段独立生效，主配置未改动。
+  宝塔面板不加载 /etc/nginx/conf.d/，别往那里放。
+
+三、IP 限流与防刷规则
+  · 单 IP 上传频率：10 次/分钟，burst 4，nodelay → 超限返回 429
+  · 单 IP 并发连接：上传接口 4 条 / 其他 10 条 → 超限返回 429
+  · 上传接口缺 X-Access-Code 请求头：nginx 在 rewrite 阶段直接 403，
+    请求体一个字节都不接收，大文件不再完整走完 nginx → 后端
+  · 所有 POST 一律要求口令头存在，堵住 /api/jobs/ 之类变体绕过精确 location
+  · GET（页面 / config / events 进度轮询 / download）不限制频率，
+    只限并发，避免误伤长转换任务的进度刷新
+  · nginx 只判断请求头「是否存在」，口令值仍由后端 .env 校验，
+    所以改访问口令不用动 nginx 配置
+  · zone 独立命名，不复用宝塔自带 perip / perserver，
+    不会和主站、WordPress、x-ui 互相挤占配额
+  · 前端：没口令时「开始转换」按钮禁用并显示「请输入访问口令」；
+    输入口令后实时恢复；链接口令自动授权，口令不进日志与 Referer
+
+  上线实测（服务器本机与公网 HTTPS）：
+    无口令 POST 6MB    → 403，0.008 秒，客户端上传 0 字节
+    错误口令 POST 6MB  → 403，0.044 秒，body 走完 6.29MB（应用层拒绝）
+    20 次连续上传 POST → 前 5 个进后端，第 6 个起全部 429
+    带口令转换下载     → xlsx 68 行 11 列，单工作表表头不冻结
+    主站首页           → 200，不受影响
+
+四、常用运维命令（docker 需要 sudo，ubuntu 不在 docker 组）
+  cd /home/ubuntu/ttqd
+  sudo docker compose ps                     查看状态
+  sudo docker compose logs -f                实时日志
+  sudo docker compose restart                重启容器
+  sudo docker compose up -d --build          改代码后重新构建
+  sudo docker compose down                   停止并移除容器
+  cat .env                                   查看当前访问口令
+  curl -s http://127.0.0.1:8765/api/config  本机直连自检
+  sudo nginx -T | grep ttqd                  看当前生效的 nginx 片段
+
+五、改访问口令
+  1. 编辑 /opt/ttqd/.env 里的 ACCESS_CODE
+  2. cd /home/ubuntu/ttqd && sudo docker compose up -d --force-recreate
+     （restart 不会重读环境变量，必须 force-recreate）
+  3. 重新生成带新口令的分享链接，旧链接立即失效
+  4. nginx 不用改，它只检查请求头存在与否
+
+六、调整限流参数
+  · 改频率：编辑 0.ttqd-limits.conf 里 rate=10r/m
+  · 改突发 / 并发：编辑 ttqd.conf 里 burst=4、limit_conn 数值
+  · 生效：sudo nginx -t && sudo nginx -s reload
+  · 完全取消限流：删除 0.ttqd-limits.conf，并删掉 ttqd.conf 里
+    所有 limit_req / limit_conn / limit_*_status 行，再 reload
+    （只删其中一个文件会导致 nginx -t 失败，注意配套）
+  · 公司 / 学校 NAT 出口多人共用同一 IP 时会共享配额，
+    遇到正常用户被 429 可适当调高 rate 与 burst
+
+七、临时下线 / 完整回滚
+  临时下线：删除 ttqd.conf 与 0.ttqd-limits.conf
+            && sudo nginx -t && sudo nginx -s reload
+  回到加固前：把 /opt/ttqd/ttqd.conf.bak.* 复制回
+            extension/your-domain.com/ttqd.conf，删掉 0.ttqd-limits.conf，reload
+  完整回滚：cd /home/ubuntu/ttqd && sudo docker compose down
+            再删掉上面两个 nginx 文件并 reload
+  主站自始至终没有改动，回滚不会影响别的站点。
+
+八、nginx 生效命令
+  sudo nginx -t && sudo nginx -s reload
+  ^~ 不能去掉：主站有 location ~* \.(js|css|png)$ 和 PHP 正则规则，
+  不带 ^~ 的话 /ttqd/api/... 会被正则 location 抢走，接口 404。
+  nginx -t 出现 "conflicting server name \"_\"" 是宝塔原有告警，可忽略。
+
+九、运行行为与安全
+  · 口令走 X-Access-Code 请求头；分享链接用 #code= fragment，
+    口令不会进 nginx 访问日志、Referer，页面加载后自动从地址栏抹掉
+  · 无口令访问页面仍会显示界面，但转换 / 查询 / 下载接口全部 403
+  · PDF 上传到服务器临时目录，转换完立即删除；结果保留 30 分钟
+  · 单次上传上限 50MB（nginx 64m）、最多 30 个文件
+  · 单文件下载 .xlsx，多文件打包 .zip
+  · 「下载结果」只对应上一次转换：改动文件列表、勾选、文件名或输出方式后，
+    结果立即失效并禁用按钮，日志提示「上次转换结果已失效」，需重新转换。
+    避免移除文件后点下载又把已删除的文件打包出来
+  · 无数据库、无账号体系，只有这一个访问口令
+  · 别把带口令链接贴到公开页面 / 搜索引擎能抓到的地方
+  · 限流只挡高频刷子，不是访问控制；拿到链接的人仍可正常使用
+  · 2 核 CPU，pdfplumber 解析是 CPU 密集活，别对外大批量开放
+
+十、排错
+  · 429  → 单 IP 触发限流。等 1 分钟自动恢复，或按第六节调高参数。
+           宝塔 error_log 级别为 crit，限流告警不写 error log，
+           但 access log 里能看到 429 状态码
+  · 403  → 页面没口令 / 口令错 / 脚本没带请求头。
+           页面没口令时按钮会禁用并提示，先看日志区
+  · 502  → 容器没起来：sudo docker compose ps / logs
+           curl -I http://127.0.0.1:8765/ 应为 200
+  · 404  → nginx 片段没放对目录，或漏了 ^~
+  · 413  → nginx 片段里 client_max_body_size 64m 未生效
+  · nginx -t 报 "directive is not allowed here"
+         → zone 定义放错位置，必须在 vhost/nginx/ 根目录的 http 级 conf
+  · 大文件超时 → 片段里 proxy_read_timeout 300s 与容器 CHANNEL_TIMEOUT
+  · 口令无效 → 页面日志会提示；cat .env 核对，改完记得 force-recreate

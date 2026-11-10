@@ -1,0 +1,108 @@
+# ============================================================
+# 宝塔面板专用 · 子路径反代片段（不是完整 server 块！）
+#
+# 放置位置：
+#   /www/server/panel/vhost/nginx/extension/your-domain.com/ttqd.conf
+#
+# 配套文件（必须先放，否则 nginx -t 会因找不到 zone 报错）：
+#   /www/server/panel/vhost/nginx/0.ttqd-limits.conf   ← nginx-limits.conf.example
+#
+# 原因：your-domain.com 主站 conf 第 15 行已 include
+#   /www/server/panel/vhost/nginx/extension/your-domain.com/*.conf
+# 放独立片段即可，主站 96 行配置一个字不用改。
+# 不要放进 /etc/nginx/conf.d/ —— 宝塔的 nginx 根本不加载那个目录。
+#
+# ^~ 不能去掉：主站有 location ~* \.(js|css|png)$ 与 PHP 正则规则，
+# 不带 ^~ 的话 /ttqd/api/... 会被正则 location 抢走，接口直接 404。
+#
+# 生效：sudo nginx -t && sudo nginx -s reload
+# ============================================================
+
+location = /ttqd {
+    return 301 /ttqd/;
+}
+
+# ------------------------------------------------------------
+# 1) 上传接口 POST /ttqd/api/jobs —— 最严格的一层
+#    · 缺 X-Access-Code 请求头：rewrite 阶段直接 403，
+#      请求体一个字节都不接收，6MB 大文件不再完整走完 nginx→后端
+#    · 只判断请求头「是否存在」，值仍由后端 .env 校验；
+#      换口令不用改 nginx
+#    · 单 IP 10 次/分钟，burst 4，超限返回 429
+#    · 并发连接 4 条，超限返回 429
+# ------------------------------------------------------------
+location = /ttqd/api/jobs {
+    if ($http_x_access_code = "") { return 403; }
+
+    limit_req zone=ttqd_upload burst=4 nodelay;
+    limit_req_status 429;
+    limit_conn ttqd_conn 4;
+    limit_conn_status 429;
+
+    proxy_pass http://127.0.0.1:8765/api/jobs;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /ttqd;
+
+    # 单个 PDF 上限 50MB，multipart 有额外开销，留到 64MB
+    client_max_body_size 64m;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}
+
+# ------------------------------------------------------------
+# 2) 其余 API（config / events / download）
+#    · 所有 POST 一律要求口令头存在，堵住 /api/jobs/ 之类变体
+#      绕过上面精确 location 的秒拒
+#    · GET 轮询 events 不限频率（读内存字典，几乎不耗资源），
+#      只做并发连接限制，避免误伤长转换任务的进度刷新
+#    · X-Access-Code 属于普通自定义请求头，nginx 默认透传
+# ------------------------------------------------------------
+location ^~ /ttqd/api/ {
+    set $ttqd_reject 0;
+    if ($request_method = POST)         { set $ttqd_reject 1; }
+    if ($http_x_access_code != "")      { set $ttqd_reject 0; }
+    if ($ttqd_reject = 1)               { return 403; }
+
+    limit_conn ttqd_conn 10;
+    limit_conn_status 429;
+
+    proxy_pass http://127.0.0.1:8765/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /ttqd;
+
+    client_max_body_size 64m;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}
+
+# ------------------------------------------------------------
+# 3) 页面与其他静态资源
+# ------------------------------------------------------------
+location ^~ /ttqd/ {
+    limit_conn ttqd_conn 10;
+    limit_conn_status 429;
+
+    # 末尾的斜杠会剥离 /ttqd/ 前缀，后端收到的仍是 /、/...
+    proxy_pass http://127.0.0.1:8765/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /ttqd;
+
+    client_max_body_size 64m;
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+}

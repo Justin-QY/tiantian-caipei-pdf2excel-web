@@ -1,0 +1,28 @@
+# ============================================================
+# 宝塔面板专用 · http 级限流区定义（不是 server 块！）
+#
+# 放置位置：
+#   /www/server/panel/vhost/nginx/0.ttqd-limits.conf
+#
+# 原因：宝塔主 nginx.conf 第 96 行（http 块内）已有
+#   include /www/server/panel/vhost/nginx/*.conf;
+# 因此该目录下 .conf 的顶层指令处于 http 上下文，
+# 而 limit_req_zone / limit_conn_zone 只能定义在 http 上下文。
+# 文件名用 0. 开头，保证按字母序先于 your-domain.com.conf 加载。
+# 宝塔主 nginx.conf 一个字都不用改。
+#
+# 注意：千万不要放进 extension/your-domain.com/ ——
+# 那个目录的 conf 是被 server 块 include 的，在里面定义 zone
+# 会直接 nginx -t 报错（"limit_req_zone" directive is not allowed here）。
+#
+# zone 独立命名，不复用宝塔自带的 perip / perserver，
+# 避免和主站、WordPress、x-ui 互相挤占配额。
+#
+# 生效：sudo nginx -t && sudo nginx -s reload
+# ============================================================
+
+# 上传接口频率：单 IP 平均 10 次/分钟（配合 ttqd.conf 里的 burst=4 nodelay）
+limit_req_zone  $binary_remote_addr zone=ttqd_upload:2m rate=10r/m;
+
+# /ttqd/ 并发连接数上限（独立计数，不影响主站）
+limit_conn_zone $binary_remote_addr zone=ttqd_conn:2m;
