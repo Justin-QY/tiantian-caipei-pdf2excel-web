@@ -451,7 +451,7 @@
   let files = [], busy = false, layout = 'single', runQueue = [];
   let jobId = null, lastSeq = 0, resultUrl = null, resultName = null, polling = false, needCode = false;
 
-  // 子路径部署（如 https://www.qyder.com/ttqd/）时自动推导接口前缀；
+  // 子路径部署（如 https://your-domain.com/ttqd/）时自动推导接口前缀；
   // 本地根路径部署时 PATH_BASE 为空，接口仍是 /api/...
   const PATH_BASE = location.pathname.replace(/\/+$/, '');
   const API = PATH_BASE + '/api';
